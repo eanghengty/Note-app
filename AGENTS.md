@@ -9,15 +9,19 @@ This project is a local-first notes app built with Vue 3 and Vite.
 - Persistence: IndexedDB via `idb`
 - Dev server port: `5195`
 - Primary goal: fast daily note-taking with a premium calm UI and strong search flow
+- Editor mode: focused full-screen writing view when a note is open
+- Body editing: native browser rich-text editing with lightweight formatting controls
 
 ## Key Files
 
 - `src/App.vue`
-  Main application UI, navigation flow, search, capture, library, and editor behavior.
+  Main application UI, navigation flow, search, capture, library, focused editor, save state, and draft recovery behavior.
 - `src/styles.css`
   Global design system and responsive layout styles.
 - `src/db.js`
   IndexedDB access layer for notes and tags.
+- `INDEXEDB-DIAGRAM.md`
+  Human-readable database overview and Mermaid diagram for the local IndexedDB schema.
 - `package.json`
   Scripts and dependencies.
 - `vite.config.js`
@@ -51,7 +55,9 @@ Avoid turning it into a generic admin dashboard or a visually noisy productivity
 - Prioritize fewer clicks and faster workflows.
 - Search and note-finding are primary workflows.
 - Quick capture should stay structured: note type first, then title.
-- The editor should remain polished plain-text, not a heavy block editor or full rich-text system unless explicitly requested.
+- The title should remain plain text.
+- The note body may use lightweight rich-text formatting, but avoid turning it into a heavy block editor.
+- When editing a note, prioritize a distraction-free writing surface: hide nonessential navigation and keep controls minimal.
 
 ## Data Model
 
@@ -72,6 +78,13 @@ Keep the current local data model unless there is an explicit migration request.
 }
 ```
 
+Notes about `body`:
+
+- `body` remains a string in IndexedDB.
+- Existing notes may contain legacy plain text.
+- Newly edited rich notes may store HTML in `body`.
+- Search, preview, and word-count logic should derive plain text from stored HTML instead of rendering raw tags.
+
 ### Tag shape
 
 ```js
@@ -86,9 +99,13 @@ Keep the current local data model unless there is an explicit migration request.
 ## Persistence Rules
 
 - IndexedDB is the source of truth.
+- The app also uses `localStorage` as a temporary draft-recovery layer for in-progress note edits; do not treat it as the canonical store.
 - Do not replace local persistence with hardcoded seed data.
 - Do not add backend or sync behavior unless explicitly requested.
 - Preserve existing stored notes when making UI changes.
+- Do not introduce a schema migration for rich-text support unless explicitly requested.
+- Be careful with save-state UX: the editor should reliably settle back to `Saved`, and refresh/navigation should not silently drop recent edits.
+- If you change note persistence, keep both IndexedDB save behavior and draft-recovery behavior working together.
 
 ## Implementation Guidance
 
@@ -97,6 +114,9 @@ Keep the current local data model unless there is an explicit migration request.
 - Preserve port `5195`.
 - Validate significant UI changes with `npm.cmd run build`.
 - If making frontend changes that affect layout or interaction, verify the running app locally when possible.
+- Preserve the focused editor flow: opening a note should feel writing-first, with metadata moved behind lightweight secondary controls.
+- Prefer dependency-light editor behavior unless there is a clear product need for a dedicated editor package.
+- Keep the focused editor full-width within its writing canvas; avoid reintroducing narrow centered width caps unless explicitly requested.
 
 ## What To Avoid
 
@@ -107,5 +127,5 @@ Keep the current local data model unless there is an explicit migration request.
 
 ## Notes For Future Agents
 
-- This workspace is not currently a git repository, so do not rely on `git diff` or `git status`.
+- This workspace is a git repository.
 - The extracted `unzipped` folder contains the original prototype reference and can be used for inspiration, but the active app lives in `src/`.

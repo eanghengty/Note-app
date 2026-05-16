@@ -39,7 +39,7 @@ const smartViewDefinitions = [
     id: 'untagged',
     label: 'Untagged',
     description: 'Notes that still need sorting.',
-    predicate: (note) => !note.tags?.length,
+    predicate: (note) => !(note.tags || []).length,
   },
 ]
 
@@ -54,16 +54,26 @@ const state = reactive({
   selectedTagId: '',
   smartView: 'all',
   saveStatus: 'idle',
+  editorDetailsOpen: false,
 })
 
 const captureType = ref('quick')
 const captureTitle = ref('')
 const draftTag = ref('')
 const saveTimer = ref(null)
+const saveInFlight = ref(false)
+const queuedSaveNoteId = ref(null)
 const searchInput = ref(null)
+const editorBody = ref(null)
+const lastPersistedSnapshots = reactive({})
+const DRAFT_STORAGE_KEY = 'ledger-note-drafts'
 
 const activeNote = computed(() => {
   return state.notes.find((note) => note.id === state.activeNoteId) || null
+})
+
+const isFocusedEditor = computed(() => {
+  return state.screen === 'editor' && !!activeNote.value
 })
 
 const activeNoteSnapshot = computed(() => {
@@ -102,10 +112,10 @@ const filteredNotes = computed(() => {
   return sortedNotes.value.filter((note) => {
     const matchesSmartView = activeSmartView.value?.predicate(note) ?? true
     const matchesType = !state.selectedType || note.type === state.selectedType
-    const matchesTag = !state.selectedTagId || note.tags.includes(state.selectedTagId)
+    const matchesTag = !state.selectedTagId || (note.tags || []).includes(state.selectedTagId)
     const matchesQuery =
       !query ||
-      `${note.title}\n${note.body}\n${note.tags.join(' ')}`.toLowerCase().includes(query)
+      `${note.title}\n${notePlainText(note)}\n${noteTagLabels(note).join(' ')}`.toLowerCase().includes(query)
 
     return matchesSmartView && matchesType && matchesTag && matchesQuery
   })
@@ -116,7 +126,7 @@ const stats = computed(() => {
     notes: state.notes.length,
     pinned: state.notes.filter((note) => note.pinned).length,
     tags: state.tags.length,
-    words: state.notes.reduce((sum, note) => sum + countWords(note.body), 0),
+    words: state.notes.reduce((sum, note) => sum + countWords(notePlainText(note)), 0),
   }
 })
 
@@ -130,11 +140,11 @@ const notesByType = computed(() => {
   }))
 })
 
-const wordsInActiveNote = computed(() => countWords(activeNote.value?.body || ''))
+const wordsInActiveNote = computed(() => countWords(notePlainText(activeNote.value)))
 
 const activeNoteTags = computed(() => {
   if (!activeNote.value) return []
-  return state.tags.filter((tag) => activeNote.value.tags.includes(tag.id))
+  return state.tags.filter((tag) => (activeNote.value.tags || []).includes(tag.id))
 })
 
 const headerTitle = computed(() => {
@@ -148,17 +158,30 @@ const searchSummary = computed(() => {
   if (state.selectedType) parts.push(state.selectedType)
   if (selectedTag.value) parts.push(`#${selectedTag.value.label}`)
   if (state.search.trim()) parts.push(`"${state.search.trim()}"`)
-  return parts.filter(Boolean).join(' · ')
+  return parts.filter(Boolean).join(' / ')
 })
 
 watch(
   () => state.activeNoteId,
-  (id) => {
+  async (id) => {
     if (!id && state.notes.length > 0) {
       state.activeNoteId = state.notes[0].id
+      return
     }
+
+    state.editorDetailsOpen = false
+
     if (!id && state.screen === 'editor') {
       state.screen = 'home'
+      return
+    }
+
+    setLastPersistedSnapshot(id, serializeNoteForSave(activeNote.value))
+
+    if (state.screen === 'editor' && id) {
+      await nextTick()
+      syncEditorBodyFromNote()
+      focusEditorBody()
     }
   },
 )
@@ -168,7 +191,34 @@ watch(
   (value) => {
     if (value.trim() && state.screen !== 'library') {
       state.screen = 'library'
+      state.editorDetailsOpen = false
     }
+  },
+)
+
+watch(
+  () => state.screen,
+  async (screen) => {
+    if (screen !== 'editor') {
+      state.editorDetailsOpen = false
+      return
+    }
+
+    await nextTick()
+    syncEditorBodyFromNote()
+    focusEditorBody()
+  },
+)
+
+watch(
+  () => activeNote.value?.body,
+  async () => {
+    if (!isFocusedEditor.value) return
+
+    await nextTick()
+
+    if (!editorBody.value || document.activeElement === editorBody.value) return
+    syncEditorBodyFromNote()
   },
 )
 
@@ -176,6 +226,14 @@ watch(
   activeNoteSnapshot,
   (snapshot) => {
     if (!snapshot || !activeNote.value) return
+    backupDraft(activeNote.value)
+
+    if (!state.ready || snapshot === getLastPersistedSnapshot(activeNote.value.id)) {
+      if (snapshot === getLastPersistedSnapshot(activeNote.value.id) && state.saveStatus !== 'saving') {
+        state.saveStatus = 'saved'
+      }
+      return
+    }
 
     if (saveTimer.value) {
       clearTimeout(saveTimer.value)
@@ -186,7 +244,7 @@ watch(
 
     saveTimer.value = setTimeout(async () => {
       await persistNoteById(noteId)
-    }, 300)
+    }, 180)
   },
   { deep: true },
 )
@@ -196,19 +254,31 @@ onMounted(async () => {
   await refreshAll()
   state.ready = true
   window.addEventListener('keydown', onGlobalKeydown)
+  window.addEventListener('pagehide', onPageHide)
+  window.addEventListener('beforeunload', onBeforeUnload)
+  document.addEventListener('visibilitychange', onVisibilityChange)
 })
 
 onBeforeUnmount(() => {
-  if (saveTimer.value) clearTimeout(saveTimer.value)
   window.removeEventListener('keydown', onGlobalKeydown)
+  window.removeEventListener('pagehide', onPageHide)
+  window.removeEventListener('beforeunload', onBeforeUnload)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+  flushPendingSave()
 })
 
 async function refreshAll() {
   state.notes = await getNotes()
   state.tags = await getTags()
+  restoreDraftsIntoState()
 
   if (!state.activeNoteId || !state.notes.some((note) => note.id === state.activeNoteId)) {
     state.activeNoteId = state.notes[0]?.id || null
+  }
+
+  setLastPersistedSnapshot(state.activeNoteId, serializeNoteForSave(activeNote.value))
+  if (activeNote.value) {
+    state.saveStatus = 'saved'
   }
 }
 
@@ -229,6 +299,9 @@ async function createNote(type = 'quick', title = '') {
   state.activeNoteId = note.id
   state.screen = 'editor'
   state.saveStatus = 'saved'
+  state.editorDetailsOpen = false
+  setLastPersistedSnapshot(note.id, serializeNoteForSave(note))
+  clearDraftBackup(note.id)
   captureType.value = 'quick'
   captureTitle.value = ''
 }
@@ -242,16 +315,68 @@ async function persistNoteById(noteId) {
   const note = state.notes.find((item) => item.id === noteId)
   if (!note) return
 
-  state.saveStatus = 'saving'
-  const saved = await saveNote(note)
-  const index = state.notes.findIndex((item) => item.id === saved.id)
-
-  if (index >= 0) {
-    state.notes[index] = saved
-    state.notes = sortNotes([...state.notes])
+  if (saveInFlight.value) {
+    queuedSaveNoteId.value = noteId
+    return
   }
 
-  state.saveStatus = 'saved'
+  const snapshotBeforeSave = serializeNoteForSave(note)
+  if (!snapshotBeforeSave || snapshotBeforeSave === getLastPersistedSnapshot(note.id)) {
+    state.saveStatus = 'saved'
+    return
+  }
+
+  saveInFlight.value = true
+  state.saveStatus = 'saving'
+  try {
+    const saved = await saveNote(note)
+    const index = state.notes.findIndex((item) => item.id === saved.id)
+
+    if (index >= 0) {
+      state.notes[index] = saved
+      state.notes = sortNotes([...state.notes])
+    }
+
+    setLastPersistedSnapshot(saved.id, serializeNoteForSave(saved))
+    clearDraftBackup(saved.id)
+    state.saveStatus = 'saved'
+  } catch (error) {
+    console.error('Failed to save note', error)
+    state.saveStatus = 'typing'
+  } finally {
+    saveInFlight.value = false
+  }
+
+  if (queuedSaveNoteId.value === noteId) {
+    queuedSaveNoteId.value = null
+    if (serializeNoteForSave(activeNote.value) !== getLastPersistedSnapshot(noteId)) {
+      await persistNoteById(noteId)
+    }
+  }
+}
+
+function syncActiveNoteBodyFromEditor() {
+  if (!activeNote.value || !editorBody.value) return
+  activeNote.value.body = normalizeEditorBody(editorBody.value.innerHTML)
+}
+
+function flushPendingSave() {
+  syncActiveNoteBodyFromEditor()
+  if (activeNote.value) {
+    backupDraft(activeNote.value)
+  }
+
+  if (!activeNote.value) {
+    if (saveTimer.value) {
+      clearTimeout(saveTimer.value)
+      saveTimer.value = null
+    }
+    return
+  }
+
+  if (saveTimer.value || state.saveStatus === 'typing') {
+    persistNoteById(activeNote.value.id)
+  }
 }
 
 async function removeCurrentNote() {
@@ -263,6 +388,7 @@ async function removeCurrentNote() {
   await deleteNote(currentId)
   state.notes = state.notes.filter((note) => note.id !== currentId)
   state.activeNoteId = state.notes[0]?.id || null
+  state.editorDetailsOpen = false
   state.screen = state.notes.length ? 'library' : 'home'
 }
 
@@ -294,7 +420,7 @@ async function addTag() {
 async function toggleNoteTag(tagId) {
   if (!activeNote.value) return
 
-  const tags = new Set(activeNote.value.tags)
+  const tags = new Set(activeNote.value.tags || [])
   if (tags.has(tagId)) tags.delete(tagId)
   else tags.add(tagId)
 
@@ -321,22 +447,43 @@ function clearFilters() {
   state.search = ''
 }
 
-function openLibrary(viewId = 'all') {
+function openLibrary(viewId = state.smartView) {
+  flushPendingSave()
   state.smartView = viewId
   state.screen = 'library'
+  state.editorDetailsOpen = false
 }
 
 function openSearch() {
+  flushPendingSave()
   state.screen = 'library'
+  state.editorDetailsOpen = false
   nextTick(() => searchInput.value?.focus())
 }
 
 function openNote(noteId) {
+  if (state.activeNoteId && state.activeNoteId !== noteId) {
+    flushPendingSave()
+  }
   state.activeNoteId = noteId
   state.screen = 'editor'
+  state.editorDetailsOpen = false
+}
+
+function toggleEditorDetails(force) {
+  state.editorDetailsOpen = typeof force === 'boolean' ? force : !state.editorDetailsOpen
 }
 
 function onGlobalKeydown(event) {
+  if (event.key === 'Escape' && state.screen === 'editor') {
+    if (state.editorDetailsOpen) {
+      state.editorDetailsOpen = false
+    } else {
+      openLibrary(state.smartView)
+    }
+    return
+  }
+
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
     event.preventDefault()
     openSearch()
@@ -345,11 +492,131 @@ function onGlobalKeydown(event) {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'n') {
     event.preventDefault()
     state.screen = 'home'
+    state.editorDetailsOpen = false
     nextTick(() => {
       const titleInput = document.querySelector('.capture-input')
       titleInput?.focus()
     })
   }
+}
+
+function onPageHide() {
+  flushPendingSave()
+}
+
+function onBeforeUnload() {
+  flushPendingSave()
+}
+
+function onVisibilityChange() {
+  if (document.visibilityState === 'hidden') {
+    flushPendingSave()
+  }
+}
+
+function onEditorBodyInput() {
+  if (!activeNote.value || !editorBody.value) return
+
+  const html = normalizeEditorBody(editorBody.value.innerHTML)
+  activeNote.value.body = html
+  syncEditorEmptyState()
+}
+
+function onEditorCheckboxChange() {
+  onEditorBodyInput()
+}
+
+function onEditorBodyClick(event) {
+  if (event.target instanceof HTMLInputElement && event.target.type === 'checkbox') {
+    onEditorBodyInput()
+  }
+}
+
+function focusEditorBody() {
+  if (!editorBody.value || !isFocusedEditor.value) return
+  editorBody.value.focus()
+  placeCaretAtEnd(editorBody.value)
+}
+
+function syncEditorBodyFromNote() {
+  if (!editorBody.value) return
+
+  const html = bodyToEditableHtml(activeNote.value?.body || '')
+  if (editorBody.value.innerHTML !== html) {
+    editorBody.value.innerHTML = html
+  }
+
+  syncEditorEmptyState()
+}
+
+function syncEditorEmptyState() {
+  if (!editorBody.value) return
+  const hasText = extractNoteText(editorBody.value.innerHTML).trim().length > 0
+  editorBody.value.dataset.empty = hasText ? 'false' : 'true'
+}
+
+function applyEditorCommand(command, value = null) {
+  if (!editorBody.value || !activeNote.value) return
+
+  editorBody.value.focus()
+  document.execCommand(command, false, value)
+  onEditorBodyInput()
+}
+
+function applyBlockFormat(tagName) {
+  applyEditorCommand('formatBlock', `<${tagName}>`)
+}
+
+function insertChecklist() {
+  if (!editorBody.value || !activeNote.value) return
+
+  const markerId = `check-${crypto.randomUUID()}`
+  const html = [
+    `<div class="checklist-row" data-checklist-id="${markerId}">`,
+    '<input type="checkbox" contenteditable="false" />',
+    '<span>Checklist item</span>',
+    '</div>',
+    '<p><br></p>',
+  ].join('')
+
+  editorBody.value.focus()
+  document.execCommand('insertHTML', false, html)
+  onEditorBodyInput()
+
+  nextTick(() => {
+    const row = editorBody.value?.querySelector(`[data-checklist-id="${markerId}"] span`)
+    if (!row) return
+    selectNodeText(row)
+  })
+}
+
+function selectNodeText(node) {
+  const selection = window.getSelection()
+  if (!selection) return
+
+  const range = document.createRange()
+  range.selectNodeContents(node)
+  selection.removeAllRanges()
+  selection.addRange(range)
+}
+
+function placeCaretAtEnd(node) {
+  const selection = window.getSelection()
+  if (!selection) return
+
+  const range = document.createRange()
+  range.selectNodeContents(node)
+  range.collapse(false)
+  selection.removeAllRanges()
+  selection.addRange(range)
+}
+
+function noteTagLabels(note) {
+  return (note?.tags || []).map((tagId) => state.tags.find((tag) => tag.id === tagId)?.label || 'tag')
+}
+
+function notePlainText(note) {
+  return extractNoteText(note?.body || '')
 }
 
 function formatDate(value) {
@@ -375,10 +642,6 @@ function formatRelativeDate(value) {
   if (diff === 1) return 'Yesterday'
   if (diff < 7) return `${diff}d ago`
   return formatShortDate(value)
-}
-
-function notePreview(note) {
-  return note.body.trim().split('\n').find(Boolean) || 'No content yet'
 }
 
 function sortNotes(notes) {
@@ -417,11 +680,170 @@ function defaultBody(type) {
 
   return ''
 }
+
+function isStoredHtml(value) {
+  return /<\/?[a-z][\s\S]*>/i.test(value || '')
+}
+
+function normalizeEditorBody(html) {
+  const text = extractNoteText(html).trim()
+  return text ? html : ''
+}
+
+function serializeNoteForSave(note) {
+  if (!note) return ''
+
+  const { title, body, type, tags, pinned } = note
+  return JSON.stringify({
+    title,
+    body,
+    type,
+    tags: [...(tags || [])].sort(),
+    pinned,
+  })
+}
+
+function getLastPersistedSnapshot(noteId) {
+  return noteId ? lastPersistedSnapshots[noteId] || '' : ''
+}
+
+function setLastPersistedSnapshot(noteId, snapshot) {
+  if (!noteId) return
+  lastPersistedSnapshots[noteId] = snapshot || ''
+}
+
+function bodyToEditableHtml(body) {
+  if (!body) return ''
+  if (isStoredHtml(body)) return body
+  return plainTextToHtml(body)
+}
+
+function plainTextToHtml(text) {
+  if (!text) return ''
+
+  return escapeHtml(text)
+    .split(/\n{2,}/)
+    .map((paragraph) => `<p>${paragraph.replace(/\n/g, '<br>')}</p>`)
+    .join('')
+}
+
+function escapeHtml(text) {
+  return text
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+}
+
+function extractNoteText(body) {
+  if (!body) return ''
+  if (!isStoredHtml(body)) return body
+
+  if (typeof document === 'undefined') {
+    return body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+  }
+
+  const scratch = document.createElement('div')
+  scratch.innerHTML = body
+
+  scratch.querySelectorAll('input[type="checkbox"]').forEach((checkbox) => {
+    const marker = document.createTextNode(checkbox.checked ? '[x] ' : '[ ] ')
+    checkbox.replaceWith(marker)
+  })
+
+  scratch.querySelectorAll('br').forEach((lineBreak) => {
+    lineBreak.replaceWith(document.createTextNode('\n'))
+  })
+
+  scratch.querySelectorAll('p, div, li, blockquote, h1, h2, h3, h4, h5, h6').forEach((node) => {
+    if (node.nextSibling) {
+      node.after(document.createTextNode('\n'))
+    }
+  })
+
+  return scratch.textContent?.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+\n/g, '\n').trim() || ''
+}
+
+function readDraftBackupMap() {
+  if (typeof window === 'undefined') return {}
+
+  try {
+    return JSON.parse(window.localStorage.getItem(DRAFT_STORAGE_KEY) || '{}')
+  } catch {
+    return {}
+  }
+}
+
+function writeDraftBackupMap(nextMap) {
+  if (typeof window === 'undefined') return
+
+  try {
+    window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(nextMap))
+  } catch {
+    // Ignore storage quota or private-mode failures; IndexedDB remains primary.
+  }
+}
+
+function backupDraft(note) {
+  if (!note || typeof window === 'undefined') return
+
+  const drafts = readDraftBackupMap()
+  drafts[note.id] = {
+    id: note.id,
+    title: note.title,
+    body: note.body,
+    type: note.type,
+    tags: Array.isArray(note.tags) ? [...note.tags] : [],
+    pinned: !!note.pinned,
+    createdAt: note.createdAt,
+    updatedAt: note.updatedAt,
+  }
+  writeDraftBackupMap(drafts)
+}
+
+function clearDraftBackup(noteId) {
+  if (!noteId || typeof window === 'undefined') return
+
+  const drafts = readDraftBackupMap()
+  if (!drafts[noteId]) return
+  delete drafts[noteId]
+  writeDraftBackupMap(drafts)
+}
+
+function restoreDraftsIntoState() {
+  const drafts = readDraftBackupMap()
+  const draftIds = Object.keys(drafts)
+  if (!draftIds.length) return
+
+  state.notes = sortNotes(
+    state.notes.map((note) => {
+      const draft = drafts[note.id]
+      if (!draft) return note
+
+      const savedSnapshot = serializeNoteForSave(note)
+      const draftSnapshot = serializeNoteForSave(draft)
+      if (savedSnapshot === draftSnapshot) {
+        clearDraftBackup(note.id)
+        return note
+      }
+
+      return {
+        ...note,
+        title: draft.title ?? note.title,
+        body: draft.body ?? note.body,
+        type: draft.type ?? note.type,
+        tags: Array.isArray(draft.tags) ? draft.tags : note.tags,
+        pinned: typeof draft.pinned === 'boolean' ? draft.pinned : note.pinned,
+      }
+    }),
+  )
+}
 </script>
 
 <template>
-  <div v-if="state.ready" class="app-shell">
-    <aside class="rail">
+  <div v-if="state.ready" :class="['app-shell', { 'focus-mode': isFocusedEditor }]">
+    <aside v-if="!isFocusedEditor" class="rail">
       <div class="brand-block">
         <div class="brand-mark"></div>
         <div>
@@ -477,8 +899,8 @@ function defaultBody(type) {
       </div>
     </aside>
 
-    <main class="main-shell">
-      <header class="topbar">
+    <main :class="['main-shell', { 'editor-main-shell': isFocusedEditor }]">
+      <header v-if="!isFocusedEditor" class="topbar">
         <div class="topbar-copy">
           <p class="eyebrow">Notes that stay out of your way</p>
           <h2>{{ headerTitle }}</h2>
@@ -486,7 +908,7 @@ function defaultBody(type) {
 
         <div class="topbar-tools">
           <label class="search-shell">
-            <span class="search-glyph">⌕</span>
+            <span class="search-glyph">Find</span>
             <input
               ref="searchInput"
               v-model="state.search"
@@ -590,7 +1012,6 @@ function defaultBody(type) {
               >
                 <div>
                   <strong>{{ note.title }}</strong>
-                  <p>{{ notePreview(note) }}</p>
                 </div>
                 <span>{{ formatRelativeDate(note.updatedAt) }}</span>
               </button>
@@ -611,9 +1032,8 @@ function defaultBody(type) {
                 class="pin-card"
                 @click="openNote(note.id)"
               >
-                <span class="pin-mark">★</span>
+                <span class="pin-mark">*</span>
                 <strong>{{ note.title }}</strong>
-                <p>{{ notePreview(note) }}</p>
               </button>
             </div>
             <div v-else class="empty-copy">Pin a few working notes to keep them easy to reach.</div>
@@ -705,10 +1125,9 @@ function defaultBody(type) {
               <div class="result-head">
                 <div>
                   <div class="result-title">
-                    <span v-if="note.pinned" class="pin-mark">★</span>
+                    <span v-if="note.pinned" class="pin-mark">*</span>
                     <strong>{{ note.title }}</strong>
                   </div>
-                  <p>{{ notePreview(note) }}</p>
                 </div>
 
                 <div class="result-meta">
@@ -717,9 +1136,9 @@ function defaultBody(type) {
                 </div>
               </div>
 
-              <div v-if="note.tags.length" class="result-tags">
+              <div v-if="(note.tags || []).length" class="result-tags">
                 <span
-                  v-for="tagId in note.tags.slice(0, 3)"
+                  v-for="tagId in (note.tags || []).slice(0, 3)"
                   :key="tagId"
                   class="inline-tag"
                 >
@@ -735,82 +1154,120 @@ function defaultBody(type) {
         </article>
       </section>
 
-      <section v-else class="screen-grid">
-        <article v-if="activeNote" class="editor-surface">
+      <section v-else :class="['screen-grid', 'editor-screen', { focused: isFocusedEditor }]">
+        <article v-if="activeNote" :class="['editor-surface', { focused: isFocusedEditor }]">
           <div class="editor-topbar">
             <div class="editor-topbar-copy">
-              <button class="back-link" @click="openLibrary(state.smartView)">← Back to library</button>
+              <button class="back-link" @click="openLibrary(state.smartView)">Back to library</button>
               <div class="editor-status">
                 <span>{{ wordsInActiveNote }} words</span>
                 <span>{{ formatDate(activeNote.updatedAt) }}</span>
                 <span class="save-indicator" :data-state="state.saveStatus">
-                  {{ state.saveStatus === 'saving' ? 'Saving…' : state.saveStatus === 'typing' ? 'Editing…' : 'Saved' }}
+                  {{ state.saveStatus === 'saving' ? 'Saving...' : state.saveStatus === 'typing' ? 'Editing...' : 'Saved' }}
                 </span>
               </div>
             </div>
 
             <div class="editor-actions">
-              <button class="secondary-btn" @click="togglePin">{{ activeNote.pinned ? 'Unpin' : 'Pin note' }}</button>
+              <button class="secondary-btn" @click="toggleEditorDetails()">
+                {{ state.editorDetailsOpen ? 'Close details' : 'Details' }}
+              </button>
               <button class="ghost-btn danger" @click="removeCurrentNote">Delete</button>
             </div>
           </div>
 
-          <div class="editor-layout">
-            <div class="editor-main">
-              <textarea
-                v-model="activeNote.title"
-                class="title-textarea"
-                rows="2"
-                placeholder="Untitled note"
-              ></textarea>
+          <div class="editor-main">
+            <textarea
+              v-model="activeNote.title"
+              class="title-textarea"
+              rows="2"
+              placeholder="Untitled note"
+            ></textarea>
 
-              <div class="editor-meta-row">
-                <select v-model="activeNote.type" class="type-select">
-                  <option v-for="type in noteTypes" :key="type" :value="type">{{ type }}</option>
-                </select>
-                <span v-if="activeNote.pinned" class="pin-pill">Pinned</span>
-                <span class="meta-faint">Created {{ formatDate(activeNote.createdAt) }}</span>
-              </div>
-
-              <textarea
-                v-model="activeNote.body"
-                class="body-textarea"
-                placeholder="Write clearly. Keep the next step obvious."
-              ></textarea>
+            <div class="editor-toolbar" aria-label="Text formatting toolbar">
+              <button class="toolbar-btn" type="button" @mousedown.prevent @click="applyEditorCommand('bold')"><strong>B</strong></button>
+              <button class="toolbar-btn" type="button" @mousedown.prevent @click="applyEditorCommand('italic')"><em>I</em></button>
+              <button class="toolbar-btn" type="button" @mousedown.prevent @click="applyEditorCommand('underline')"><u>U</u></button>
+              <button class="toolbar-btn" type="button" @mousedown.prevent @click="applyBlockFormat('h1')">H1</button>
+              <button class="toolbar-btn" type="button" @mousedown.prevent @click="applyBlockFormat('h2')">H2</button>
+              <button class="toolbar-btn" type="button" @mousedown.prevent @click="applyEditorCommand('insertUnorderedList')">- List</button>
+              <button class="toolbar-btn" type="button" @mousedown.prevent @click="applyEditorCommand('insertOrderedList')">1. List</button>
+              <button class="toolbar-btn" type="button" @mousedown.prevent @click="insertChecklist()">Checklist</button>
+              <button class="toolbar-btn" type="button" @mousedown.prevent @click="applyBlockFormat('blockquote')">Quote</button>
             </div>
 
-            <aside class="editor-sidecar">
-              <div class="sidecar-block">
-                <p class="eyebrow">Note tags</p>
-                <div v-if="state.tags.length" class="tag-toggle-grid">
-                  <button
-                    v-for="tag in state.tags"
-                    :key="tag.id"
-                    :class="['tag-toggle', { active: activeNote.tags.includes(tag.id) }]"
-                    @click="toggleNoteTag(tag.id)"
-                  >
-                    <span class="tag-dot" :style="{ backgroundColor: `hsl(${tag.hue}, 70%, 48%)` }"></span>
-                    {{ tag.label }}
-                  </button>
-                </div>
-                <div v-else class="empty-copy compact">No tags yet. Create them from Home.</div>
-              </div>
-
-              <div class="sidecar-block">
-                <p class="eyebrow">Attached now</p>
-                <div v-if="activeNoteTags.length" class="selected-tags">
-                  <span
-                    v-for="tag in activeNoteTags"
-                    :key="tag.id"
-                    class="inline-tag selected"
-                  >
-                    #{{ tag.label }}
-                  </span>
-                </div>
-                <div v-else class="empty-copy compact">This note is still untagged.</div>
-              </div>
-            </aside>
+            <div class="body-editor-shell">
+              <div
+                ref="editorBody"
+                class="rich-editor"
+                contenteditable="true"
+                data-placeholder="Write clearly. Keep the next step obvious."
+                @input="onEditorBodyInput"
+                @change="onEditorCheckboxChange"
+                @click="onEditorBodyClick"
+              ></div>
+            </div>
           </div>
+
+          <transition name="fade">
+            <div
+              v-if="state.editorDetailsOpen"
+              class="editor-details-layer"
+              @click.self="toggleEditorDetails(false)"
+            >
+              <aside class="editor-details-panel">
+                <div class="details-head">
+                  <div>
+                    <p class="eyebrow">Note details</p>
+                    <h3>{{ activeNote.title || 'Untitled note' }}</h3>
+                  </div>
+                  <button class="micro-btn" @click="toggleEditorDetails(false)">Close</button>
+                </div>
+
+                <div class="sidecar-block">
+                  <p class="eyebrow">Properties</p>
+                  <div class="details-stack">
+                    <select v-model="activeNote.type" class="type-select">
+                      <option v-for="type in noteTypes" :key="type" :value="type">{{ type }}</option>
+                    </select>
+                    <button class="secondary-btn" @click="togglePin">{{ activeNote.pinned ? 'Unpin note' : 'Pin note' }}</button>
+                    <span class="meta-faint">Created {{ formatDate(activeNote.createdAt) }}</span>
+                    <span class="meta-faint">Updated {{ formatDate(activeNote.updatedAt) }}</span>
+                  </div>
+                </div>
+
+                <div class="sidecar-block">
+                  <p class="eyebrow">Note tags</p>
+                  <div v-if="state.tags.length" class="tag-toggle-grid">
+                    <button
+                      v-for="tag in state.tags"
+                      :key="tag.id"
+                      :class="['tag-toggle', { active: (activeNote.tags || []).includes(tag.id) }]"
+                      @click="toggleNoteTag(tag.id)"
+                    >
+                      <span class="tag-dot" :style="{ backgroundColor: `hsl(${tag.hue}, 70%, 48%)` }"></span>
+                      {{ tag.label }}
+                    </button>
+                  </div>
+                  <div v-else class="empty-copy compact">No tags yet. Create them from Home.</div>
+                </div>
+
+                <div class="sidecar-block">
+                  <p class="eyebrow">Attached now</p>
+                  <div v-if="activeNoteTags.length" class="selected-tags">
+                    <span
+                      v-for="tag in activeNoteTags"
+                      :key="tag.id"
+                      class="inline-tag selected"
+                    >
+                      #{{ tag.label }}
+                    </span>
+                  </div>
+                  <div v-else class="empty-copy compact">This note is still untagged.</div>
+                </div>
+              </aside>
+            </div>
+          </transition>
         </article>
 
         <article v-else class="surface-card empty-editor">
@@ -822,7 +1279,7 @@ function defaultBody(type) {
       </section>
     </main>
 
-    <nav class="mobile-nav">
+    <nav v-if="!isFocusedEditor" class="mobile-nav">
       <button :class="{ active: state.screen === 'home' }" @click="state.screen = 'home'">Home</button>
       <button :class="{ active: state.screen === 'library' }" @click="openSearch()">Search</button>
       <button :class="{ active: state.screen === 'library' }" @click="openLibrary()">Notes</button>
@@ -831,6 +1288,6 @@ function defaultBody(type) {
   </div>
 
   <div v-else class="loading-screen">
-    <p>Loading Ledger…</p>
+    <p>Loading Ledger...</p>
   </div>
 </template>
