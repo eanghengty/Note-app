@@ -11,6 +11,7 @@ This project is a local-first notes app built with Vue 3 and Vite.
 - Primary goal: fast daily note-taking with a premium calm UI and strong search flow
 - Editor mode: focused full-screen writing view when a note is open
 - Body editing: native browser rich-text editing with lightweight formatting controls
+- Navigation: collapsible icon-first sidebar with hover expand on pointer devices
 
 ## Key Files
 
@@ -22,6 +23,8 @@ This project is a local-first notes app built with Vue 3 and Vite.
   IndexedDB access layer for notes and tags.
 - `INDEXEDB-DIAGRAM.md`
   Human-readable database overview and Mermaid diagram for the local IndexedDB schema.
+- `README.md`
+  Project overview, local setup, feature summary, and storage notes for humans.
 - `package.json`
   Scripts and dependencies.
 - `vite.config.js`
@@ -58,6 +61,9 @@ Avoid turning it into a generic admin dashboard or a visually noisy productivity
 - The title should remain plain text.
 - The note body may use lightweight rich-text formatting, but avoid turning it into a heavy block editor.
 - When editing a note, prioritize a distraction-free writing surface: hide nonessential navigation and keep controls minimal.
+- The main desktop navigation should stay compact, calm, and icon-legible when collapsed.
+- Sticky headers and polished custom scrollbars are part of the intended experience, not optional decoration.
+- Avoid browser-default looking controls when a control is part of the core product surface.
 
 ## Data Model
 
@@ -117,6 +123,8 @@ Notes about `body`:
 - Preserve the focused editor flow: opening a note should feel writing-first, with metadata moved behind lightweight secondary controls.
 - Prefer dependency-light editor behavior unless there is a clear product need for a dedicated editor package.
 - Keep the focused editor full-width within its writing canvas; avoid reintroducing narrow centered width caps unless explicitly requested.
+- Preserve the current custom dropdown treatment for note-type and filter controls; opened menus should layer above nearby cards.
+- Keep the sidebar sticky and hover-expand behavior aligned with the sticky main header on non-editor screens.
 
 ## What To Avoid
 

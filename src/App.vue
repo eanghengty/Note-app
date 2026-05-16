@@ -55,6 +55,7 @@ const state = reactive({
   smartView: 'all',
   saveStatus: 'idle',
   editorDetailsOpen: false,
+  confirmDialogOpen: false,
 })
 
 const captureType = ref('quick')
@@ -63,10 +64,21 @@ const draftTag = ref('')
 const saveTimer = ref(null)
 const saveInFlight = ref(false)
 const queuedSaveNoteId = ref(null)
+const sidebarExpanded = ref(false)
+const sidebarHoverCapable = ref(false)
 const searchInput = ref(null)
 const editorBody = ref(null)
+const openDropdownId = ref('')
 const lastPersistedSnapshots = reactive({})
 const DRAFT_STORAGE_KEY = 'ledger-note-drafts'
+const confirmDialog = reactive({
+  title: '',
+  message: '',
+  confirmLabel: 'Confirm',
+  tone: 'default',
+  pending: false,
+  action: null,
+})
 
 const activeNote = computed(() => {
   return state.notes.find((note) => note.id === state.activeNoteId) || null
@@ -74,6 +86,10 @@ const activeNote = computed(() => {
 
 const isFocusedEditor = computed(() => {
   return state.screen === 'editor' && !!activeNote.value
+})
+
+const isSidebarCollapsed = computed(() => {
+  return !isFocusedEditor.value && !sidebarExpanded.value
 })
 
 const activeNoteSnapshot = computed(() => {
@@ -104,6 +120,35 @@ const smartViews = computed(() => {
 
 const activeSmartView = computed(() => {
   return smartViews.value.find((view) => view.id === state.smartView) || smartViews.value[0]
+})
+
+const railNavItems = computed(() => {
+  return [
+    {
+      id: 'home',
+      label: 'Home',
+      icon: 'home',
+      active: state.screen === 'home',
+      action: () => {
+        state.screen = 'home'
+        state.editorDetailsOpen = false
+      },
+    },
+    {
+      id: 'library',
+      label: 'Search & notes',
+      icon: 'library',
+      active: state.screen === 'library',
+      action: () => openLibrary(),
+    },
+    {
+      id: 'editor',
+      label: 'Editor',
+      icon: 'editor',
+      active: state.screen === 'editor',
+      action: () => (state.activeNoteId ? (state.screen = 'editor') : openLibrary()),
+    },
+  ]
 })
 
 const filteredNotes = computed(() => {
@@ -139,6 +184,12 @@ const notesByType = computed(() => {
     count: state.notes.filter((note) => note.type === type).length,
   }))
 })
+
+const captureTypeLabel = computed(() => formatNoteTypeLabel(captureType.value))
+const selectedTypeLabel = computed(() => {
+  return state.selectedType ? `${formatNoteTypeLabel(state.selectedType)} (${notesByType.value.find((item) => item.type === state.selectedType)?.count || 0})` : 'All types'
+})
+const activeNoteTypeLabel = computed(() => formatNoteTypeLabel(activeNote.value?.type || 'quick'))
 
 const wordsInActiveNote = computed(() => countWords(notePlainText(activeNote.value)))
 
@@ -253,16 +304,21 @@ onMounted(async () => {
   await seedIfEmpty()
   await refreshAll()
   state.ready = true
+  syncSidebarInputMode()
   window.addEventListener('keydown', onGlobalKeydown)
+  window.addEventListener('pointerdown', onGlobalPointerDown)
   window.addEventListener('pagehide', onPageHide)
   window.addEventListener('beforeunload', onBeforeUnload)
+  window.addEventListener('resize', syncSidebarInputMode)
   document.addEventListener('visibilitychange', onVisibilityChange)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onGlobalKeydown)
+  window.removeEventListener('pointerdown', onGlobalPointerDown)
   window.removeEventListener('pagehide', onPageHide)
   window.removeEventListener('beforeunload', onBeforeUnload)
+  window.removeEventListener('resize', syncSidebarInputMode)
   document.removeEventListener('visibilitychange', onVisibilityChange)
   flushPendingSave()
 })
@@ -381,15 +437,23 @@ function flushPendingSave() {
 
 async function removeCurrentNote() {
   if (!activeNote.value) return
-  const confirmed = window.confirm(`Delete "${activeNote.value.title}"? This cannot be undone.`)
-  if (!confirmed) return
+  openConfirmDialog({
+    title: 'Delete note?',
+    message: `Remove "${activeNote.value.title}" from this device? This cannot be undone.`,
+    confirmLabel: 'Delete note',
+    tone: 'danger',
+    action: async () => {
+      const currentId = activeNote.value?.id
+      if (!currentId) return
 
-  const currentId = activeNote.value.id
-  await deleteNote(currentId)
-  state.notes = state.notes.filter((note) => note.id !== currentId)
-  state.activeNoteId = state.notes[0]?.id || null
-  state.editorDetailsOpen = false
-  state.screen = state.notes.length ? 'library' : 'home'
+      await deleteNote(currentId)
+      clearDraftBackup(currentId)
+      state.notes = state.notes.filter((note) => note.id !== currentId)
+      state.activeNoteId = state.notes[0]?.id || null
+      state.editorDetailsOpen = false
+      state.screen = state.notes.length ? 'library' : 'home'
+    },
+  })
 }
 
 async function togglePin() {
@@ -430,14 +494,19 @@ async function toggleNoteTag(tagId) {
 
 async function removeTagEverywhere(tagId) {
   const tag = state.tags.find((item) => item.id === tagId)
-  const confirmed = window.confirm(`Delete tag "${tag?.label || 'tag'}" from the workspace?`)
-  if (!confirmed) return
-
-  await deleteTag(tagId)
-  await refreshAll()
-  if (state.selectedTagId === tagId) {
-    state.selectedTagId = ''
-  }
+  openConfirmDialog({
+    title: 'Delete tag?',
+    message: `Delete "${tag?.label || 'tag'}" from the workspace and remove it from notes that use it?`,
+    confirmLabel: 'Delete tag',
+    tone: 'danger',
+    action: async () => {
+      await deleteTag(tagId)
+      await refreshAll()
+      if (state.selectedTagId === tagId) {
+        state.selectedTagId = ''
+      }
+    },
+  })
 }
 
 function clearFilters() {
@@ -474,7 +543,108 @@ function toggleEditorDetails(force) {
   state.editorDetailsOpen = typeof force === 'boolean' ? force : !state.editorDetailsOpen
 }
 
+function syncSidebarInputMode() {
+  if (typeof window === 'undefined' || !window.matchMedia) return
+  sidebarHoverCapable.value = window.matchMedia('(hover: hover) and (pointer: fine)').matches
+  sidebarExpanded.value = !sidebarHoverCapable.value
+}
+
+function onRailMouseEnter() {
+  if (sidebarHoverCapable.value) {
+    sidebarExpanded.value = true
+  }
+}
+
+function onRailMouseLeave() {
+  if (sidebarHoverCapable.value) {
+    sidebarExpanded.value = false
+  }
+}
+
+function toggleDropdown(dropdownId) {
+  openDropdownId.value = openDropdownId.value === dropdownId ? '' : dropdownId
+}
+
+function closeDropdown() {
+  openDropdownId.value = ''
+}
+
+function onGlobalPointerDown(event) {
+  if (event.target instanceof Element && event.target.closest('.custom-select')) return
+  closeDropdown()
+}
+
+function selectCaptureType(type) {
+  captureType.value = type
+  closeDropdown()
+}
+
+function selectFilterType(type) {
+  state.selectedType = type
+  closeDropdown()
+}
+
+function selectActiveNoteType(type) {
+  if (!activeNote.value) return
+  activeNote.value.type = type
+  closeDropdown()
+}
+
+function openCaptureScreen() {
+  flushPendingSave()
+  state.screen = 'home'
+  state.editorDetailsOpen = false
+  nextTick(() => {
+    const titleInput = document.querySelector('.capture-input')
+    titleInput?.focus()
+  })
+}
+
+function openConfirmDialog({ title, message, confirmLabel, tone = 'default', action }) {
+  confirmDialog.title = title
+  confirmDialog.message = message
+  confirmDialog.confirmLabel = confirmLabel
+  confirmDialog.tone = tone
+  confirmDialog.pending = false
+  confirmDialog.action = action
+  state.confirmDialogOpen = true
+}
+
+function closeConfirmDialog(force = false) {
+  if (confirmDialog.pending && !force) return
+  state.confirmDialogOpen = false
+  confirmDialog.title = ''
+  confirmDialog.message = ''
+  confirmDialog.confirmLabel = 'Confirm'
+  confirmDialog.tone = 'default'
+  confirmDialog.pending = false
+  confirmDialog.action = null
+}
+
+async function confirmDialogAction() {
+  if (!confirmDialog.action || confirmDialog.pending) return
+
+  confirmDialog.pending = true
+  try {
+    await confirmDialog.action()
+  } finally {
+    confirmDialog.pending = false
+  }
+
+  closeConfirmDialog(true)
+}
+
 function onGlobalKeydown(event) {
+  if (event.key === 'Escape' && openDropdownId.value) {
+    closeDropdown()
+    return
+  }
+
+  if (event.key === 'Escape' && state.confirmDialogOpen) {
+    closeConfirmDialog()
+    return
+  }
+
   if (event.key === 'Escape' && state.screen === 'editor') {
     if (state.editorDetailsOpen) {
       state.editorDetailsOpen = false
@@ -489,14 +659,9 @@ function onGlobalKeydown(event) {
     openSearch()
   }
 
-  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'n') {
+  if (event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === 'n') {
     event.preventDefault()
-    state.screen = 'home'
-    state.editorDetailsOpen = false
-    nextTick(() => {
-      const titleInput = document.querySelector('.capture-input')
-      titleInput?.focus()
-    })
+    openCaptureScreen()
   }
 }
 
@@ -667,6 +832,45 @@ function defaultTitle(type) {
   if (type === 'project') return 'Project note'
   if (type === 'reference') return 'Reference note'
   return 'Quick note'
+}
+
+function formatNoteTypeLabel(type) {
+  if (!type) return ''
+  return type.charAt(0).toUpperCase() + type.slice(1)
+}
+
+function iconPath(name) {
+  const paths = {
+    home: 'M4 10.5 12 4l8 6.5V20a1 1 0 0 1-1 1h-4.8a1 1 0 0 1-1-1v-4h-2.4v4a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z',
+    library: 'M5 4h10a3 3 0 0 1 3 3v12H8a3 3 0 0 0-3 3zm3 0H6a2 2 0 0 0-2 2v13.2A4 4 0 0 1 8 18h9V7a2 2 0 0 0-2-2zm2.5 4h4.5v1.8h-4.5zm0 3.5h4.5v1.8h-4.5z',
+    editor: 'M4 17.2V20h2.8L17.9 8.9l-2.8-2.8zm14.7-9.1a1 1 0 0 0 0-1.4L16.5 4.5a1 1 0 0 0-1.4 0l-1.4 1.4 4.2 4.2z',
+    all: 'M4 4h7v7H4zm9 0h7v7h-7zM4 13h7v7H4zm9 0h7v7h-7z',
+    recent: 'M12 5.2a6.8 6.8 0 1 1-5.1 2.3H4.8V5.2h2.3v2.1A8.8 8.8 0 1 0 12 3.2zm-.9 2.5h1.8v4.2l3 1.8-.9 1.5-3.9-2.4z',
+    pinned: 'M12 3.8 17 8v1.3l-2.2.7v4.4L12 12.8 9.2 14.4V10L7 9.3V8zM11 14.4h2V20h-2z',
+    meetings: 'M6 5h1.6V3.8h1.8V5h5.2V3.8h1.8V5H18a2 2 0 0 1 2 2v10.8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2m0 4.2v8.6h12V9.2z',
+    quick: 'M12 3.5 4.5 13h5l-1.2 7.5L19.5 11h-5.1z',
+    untagged: 'M5 6.2A2.2 2.2 0 0 1 7.2 4H13l6.2 6.2a1 1 0 0 1 0 1.4l-7.6 7.6a1 1 0 0 1-1.4 0L4.8 13.8a2.2 2.2 0 0 1 0-3.1zm3 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2z',
+    local: 'M12 3.8a7.8 7.8 0 1 1 0 15.6A7.8 7.8 0 0 1 12 3.8m0 2a5.8 5.8 0 1 0 0 11.6A5.8 5.8 0 0 0 12 5.8m-.9 1.7h1.8v4l3 1.8-.9 1.5-3.9-2.3z',
+  }
+
+  return paths[name] || paths.home
+}
+
+function smartViewIcon(viewId) {
+  const mapping = {
+    all: 'all',
+    recent: 'recent',
+    pinned: 'pinned',
+    meetings: 'meetings',
+    quick: 'quick',
+    untagged: 'untagged',
+  }
+
+  return mapping[viewId] || 'all'
+}
+
+function tagInitial(label) {
+  return (label || '#').trim().charAt(0).toUpperCase() || '#'
 }
 
 function defaultBody(type) {
@@ -842,21 +1046,48 @@ function restoreDraftsIntoState() {
 </script>
 
 <template>
-  <div v-if="state.ready" :class="['app-shell', { 'focus-mode': isFocusedEditor }]">
-    <aside v-if="!isFocusedEditor" class="rail">
+  <div
+    v-if="state.ready"
+    :class="[
+      'app-shell',
+      {
+        'focus-mode': isFocusedEditor,
+        'rail-collapsed': isSidebarCollapsed,
+        'rail-expanded': !isFocusedEditor && sidebarExpanded,
+      },
+    ]"
+  >
+    <aside
+      v-if="!isFocusedEditor"
+      :class="['rail', { collapsed: isSidebarCollapsed }]"
+      @mouseenter="onRailMouseEnter"
+      @mouseleave="onRailMouseLeave"
+    >
       <div class="brand-block">
-        <div class="brand-mark"></div>
-        <div>
-          <p class="eyebrow">Calm workspace</p>
-          <h1>Ledger</h1>
+        <div class="brand-copy">
+          <div class="brand-mark"></div>
+          <div class="brand-text">
+            <p class="eyebrow">Calm workspace</p>
+            <h1>Ledger</h1>
+          </div>
         </div>
       </div>
 
       <nav class="rail-nav">
-        <button :class="['rail-link', { active: state.screen === 'home' }]" @click="state.screen = 'home'">Home</button>
-        <button :class="['rail-link', { active: state.screen === 'library' }]" @click="openLibrary()">Search & notes</button>
-        <button :class="['rail-link', { active: state.screen === 'editor' }]" @click="state.activeNoteId ? state.screen = 'editor' : openLibrary()">
-          Editor
+        <button
+          v-for="item in railNavItems"
+          :key="item.id"
+          :class="['rail-link', 'rail-item', { active: item.active, compact: isSidebarCollapsed }]"
+          :title="item.label"
+          :aria-label="item.label"
+          @click="item.action()"
+        >
+          <span class="rail-item-main">
+            <svg class="rail-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path :d="iconPath(item.icon)" />
+            </svg>
+            <span class="rail-label">{{ item.label }}</span>
+          </span>
         </button>
       </nav>
 
@@ -867,36 +1098,46 @@ function restoreDraftsIntoState() {
         <button
           v-for="view in smartViews"
           :key="view.id"
-          :class="['smart-link', { active: state.smartView === view.id }]"
+          :class="['smart-link', 'rail-item', { active: state.smartView === view.id, compact: isSidebarCollapsed }]"
+          :title="view.label"
+          :aria-label="view.label"
           @click="openLibrary(view.id)"
         >
-          <span>{{ view.label }}</span>
-          <span>{{ view.count }}</span>
+          <span class="rail-item-main">
+            <svg class="rail-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path :d="iconPath(smartViewIcon(view.id))" />
+            </svg>
+            <span class="rail-label">{{ view.label }}</span>
+          </span>
+          <span class="rail-meta">{{ view.count }}</span>
         </button>
       </section>
 
       <section class="rail-section">
         <div class="section-line">
           <h2>Tags</h2>
-          <button v-if="selectedTag" class="micro-btn" @click="state.selectedTagId = ''">Clear</button>
+          <button v-if="selectedTag && !isSidebarCollapsed" class="micro-btn" @click="state.selectedTagId = ''">Clear</button>
         </div>
         <div class="mini-tag-list">
           <button
-            v-for="tag in state.tags.slice(0, 8)"
+            v-for="tag in state.tags"
             :key="tag.id"
-            :class="['mini-tag', { active: state.selectedTagId === tag.id }]"
+            :class="['mini-tag', 'rail-item', { active: state.selectedTagId === tag.id, compact: isSidebarCollapsed }]"
+            :title="tag.label"
+            :aria-label="tag.label"
             @click="state.selectedTagId = state.selectedTagId === tag.id ? '' : tag.id; openLibrary(state.smartView)"
           >
-            <span class="tag-dot" :style="{ backgroundColor: `hsl(${tag.hue}, 70%, 48%)` }"></span>
-            <span>{{ tag.label }}</span>
+            <span
+              class="tag-initial"
+              :style="{ backgroundColor: `hsl(${tag.hue}, 65%, 58%)`, color: 'hsl(22, 32%, 18%)' }"
+            >
+              {{ tagInitial(tag.label) }}
+            </span>
+            <span class="rail-label">{{ tag.label }}</span>
           </button>
         </div>
       </section>
 
-      <div class="rail-foot">
-        <p class="eyebrow">Local-first</p>
-        <p>Everything stays in IndexedDB on this device.</p>
-      </div>
     </aside>
 
     <main :class="['main-shell', { 'editor-main-shell': isFocusedEditor }]">
@@ -908,7 +1149,7 @@ function restoreDraftsIntoState() {
 
         <div class="topbar-tools">
           <label class="search-shell">
-            <span class="search-glyph">Find</span>
+            <span class="search-glyph" aria-hidden="true"></span>
             <input
               ref="searchInput"
               v-model="state.search"
@@ -919,9 +1160,27 @@ function restoreDraftsIntoState() {
           </label>
 
           <div class="capture-bar">
-            <select v-model="captureType" aria-label="Capture type">
-              <option v-for="type in noteTypes" :key="type" :value="type">{{ type }}</option>
-            </select>
+            <div class="custom-select">
+              <button
+                type="button"
+                class="select-trigger"
+                :class="{ open: openDropdownId === 'capture-type' }"
+                @click="toggleDropdown('capture-type')"
+              >
+                <span class="select-trigger-label">{{ captureTypeLabel }}</span>
+              </button>
+              <div v-if="openDropdownId === 'capture-type'" class="select-menu">
+                <button
+                  v-for="type in noteTypes"
+                  :key="type"
+                  type="button"
+                  :class="['select-option', { active: captureType === type }]"
+                  @click="selectCaptureType(type)"
+                >
+                  {{ formatNoteTypeLabel(type) }}
+                </button>
+              </div>
+            </div>
             <input
               v-model="captureTitle"
               class="capture-input"
@@ -951,7 +1210,7 @@ function restoreDraftsIntoState() {
             </div>
             <div class="meta-pill">
               <span class="meta-label">New capture</span>
-              <strong>Cmd/Ctrl + N</strong>
+              <strong>Alt + N</strong>
             </div>
           </div>
         </article>
@@ -1074,12 +1333,34 @@ function restoreDraftsIntoState() {
           </div>
 
           <div class="filter-actions">
-            <select v-model="state.selectedType">
-              <option value="">All types</option>
-              <option v-for="item in notesByType" :key="item.type" :value="item.type">
-                {{ item.type }} ({{ item.count }})
-              </option>
-            </select>
+            <div class="custom-select filter-select">
+              <button
+                type="button"
+                class="select-trigger"
+                :class="{ open: openDropdownId === 'filter-type' }"
+                @click="toggleDropdown('filter-type')"
+              >
+                <span class="select-trigger-label">{{ selectedTypeLabel }}</span>
+              </button>
+              <div v-if="openDropdownId === 'filter-type'" class="select-menu">
+                <button
+                  type="button"
+                  :class="['select-option', { active: !state.selectedType }]"
+                  @click="selectFilterType('')"
+                >
+                  All types
+                </button>
+                <button
+                  v-for="item in notesByType"
+                  :key="item.type"
+                  type="button"
+                  :class="['select-option', { active: state.selectedType === item.type }]"
+                  @click="selectFilterType(item.type)"
+                >
+                  {{ formatNoteTypeLabel(item.type) }} ({{ item.count }})
+                </button>
+              </div>
+            </div>
             <button class="secondary-btn" @click="clearFilters">Reset filters</button>
           </div>
         </article>
@@ -1227,9 +1508,27 @@ function restoreDraftsIntoState() {
                 <div class="sidecar-block">
                   <p class="eyebrow">Properties</p>
                   <div class="details-stack">
-                    <select v-model="activeNote.type" class="type-select">
-                      <option v-for="type in noteTypes" :key="type" :value="type">{{ type }}</option>
-                    </select>
+                    <div class="custom-select">
+                      <button
+                        type="button"
+                        class="select-trigger type-select"
+                        :class="{ open: openDropdownId === 'editor-type' }"
+                        @click="toggleDropdown('editor-type')"
+                      >
+                        <span class="select-trigger-label">{{ activeNoteTypeLabel }}</span>
+                      </button>
+                      <div v-if="openDropdownId === 'editor-type'" class="select-menu">
+                        <button
+                          v-for="type in noteTypes"
+                          :key="type"
+                          type="button"
+                          :class="['select-option', { active: activeNote?.type === type }]"
+                          @click="selectActiveNoteType(type)"
+                        >
+                          {{ formatNoteTypeLabel(type) }}
+                        </button>
+                      </div>
+                    </div>
                     <button class="secondary-btn" @click="togglePin">{{ activeNote.pinned ? 'Unpin note' : 'Pin note' }}</button>
                     <span class="meta-faint">Created {{ formatDate(activeNote.createdAt) }}</span>
                     <span class="meta-faint">Updated {{ formatDate(activeNote.updatedAt) }}</span>
@@ -1279,12 +1578,30 @@ function restoreDraftsIntoState() {
       </section>
     </main>
 
-    <nav v-if="!isFocusedEditor" class="mobile-nav">
-      <button :class="{ active: state.screen === 'home' }" @click="state.screen = 'home'">Home</button>
-      <button :class="{ active: state.screen === 'library' }" @click="openSearch()">Search</button>
-      <button :class="{ active: state.screen === 'library' }" @click="openLibrary()">Notes</button>
-      <button :class="{ active: state.screen === 'editor' }" @click="state.activeNoteId ? state.screen = 'editor' : openLibrary()">Editor</button>
-    </nav>
+    <transition name="fade">
+      <div
+        v-if="state.confirmDialogOpen"
+        class="modal-layer"
+        @click.self="closeConfirmDialog()"
+      >
+        <div class="confirm-modal">
+          <p class="eyebrow">Please confirm</p>
+          <h3>{{ confirmDialog.title }}</h3>
+          <p class="modal-copy">{{ confirmDialog.message }}</p>
+
+          <div class="modal-actions">
+            <button class="ghost-btn" :disabled="confirmDialog.pending" @click="closeConfirmDialog()">Cancel</button>
+            <button
+              :class="['primary-btn', 'modal-confirm', { danger: confirmDialog.tone === 'danger' }]"
+              :disabled="confirmDialog.pending"
+              @click="confirmDialogAction()"
+            >
+              {{ confirmDialog.pending ? 'Working...' : confirmDialog.confirmLabel }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </transition>
   </div>
 
   <div v-else class="loading-screen">
