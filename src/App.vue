@@ -1,6 +1,8 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import lottie from 'lottie-web'
 import { deleteNote, deleteTag, getNotes, getTags, saveNote, saveTag, seedIfEmpty } from './db'
+import catFeelingAnimation from '../Cat feeling animation.json'
 
 const noteTypes = ['quick', 'meeting', 'project', 'analysis', 'reference']
 
@@ -66,7 +68,13 @@ const saveInFlight = ref(false)
 const queuedSaveNoteId = ref(null)
 const sidebarExpanded = ref(false)
 const sidebarHoverCapable = ref(false)
+const topbarCompactEligible = ref(false)
+const hasScrolledPastTopbar = ref(false)
+const currentScrollTop = ref(0)
 const searchInput = ref(null)
+const topbarSentinel = ref(null)
+const heroAnimationHost = ref(null)
+const titleTextarea = ref(null)
 const editorBody = ref(null)
 const openDropdownId = ref('')
 const lastPersistedSnapshots = reactive({})
@@ -80,6 +88,9 @@ const confirmDialog = reactive({
   action: null,
 })
 
+let topbarObserver = null
+let heroAnimationInstance = null
+
 const activeNote = computed(() => {
   return state.notes.find((note) => note.id === state.activeNoteId) || null
 })
@@ -90,6 +101,14 @@ const isFocusedEditor = computed(() => {
 
 const isSidebarCollapsed = computed(() => {
   return !isFocusedEditor.value && !sidebarExpanded.value
+})
+
+const isTopbarCondensed = computed(() => {
+  return !isFocusedEditor.value && state.screen === 'home' && hasScrolledPastTopbar.value && topbarCompactEligible.value
+})
+
+const showEditorScrollTopButton = computed(() => {
+  return isFocusedEditor.value && currentScrollTop.value > 180
 })
 
 const activeNoteSnapshot = computed(() => {
@@ -250,12 +269,23 @@ watch(
 watch(
   () => state.screen,
   async (screen) => {
+    if (screen === 'home') {
+      await nextTick()
+      initHeroAnimation()
+    } else {
+      destroyHeroAnimation()
+    }
+
     if (screen !== 'editor') {
       state.editorDetailsOpen = false
+      await nextTick()
+      initTopbarObserver()
       return
     }
 
+    destroyTopbarObserver()
     await nextTick()
+    syncTitleTextareaHeight()
     syncEditorBodyFromNote()
     focusEditorBody()
   },
@@ -305,11 +335,18 @@ onMounted(async () => {
   await refreshAll()
   state.ready = true
   syncSidebarInputMode()
+  syncStickyChromeState()
+  await nextTick()
+  initTopbarObserver()
+  initHeroAnimation()
+  syncTitleTextareaHeight()
   window.addEventListener('keydown', onGlobalKeydown)
   window.addEventListener('pointerdown', onGlobalPointerDown)
   window.addEventListener('pagehide', onPageHide)
   window.addEventListener('beforeunload', onBeforeUnload)
   window.addEventListener('resize', syncSidebarInputMode)
+  window.addEventListener('scroll', syncStickyChromeState, { passive: true })
+  document.addEventListener('scroll', syncStickyChromeState, { passive: true })
   document.addEventListener('visibilitychange', onVisibilityChange)
 })
 
@@ -319,7 +356,11 @@ onBeforeUnmount(() => {
   window.removeEventListener('pagehide', onPageHide)
   window.removeEventListener('beforeunload', onBeforeUnload)
   window.removeEventListener('resize', syncSidebarInputMode)
+  window.removeEventListener('scroll', syncStickyChromeState)
+  document.removeEventListener('scroll', syncStickyChromeState)
   document.removeEventListener('visibilitychange', onVisibilityChange)
+  destroyTopbarObserver()
+  destroyHeroAnimation()
   flushPendingSave()
 })
 
@@ -546,7 +587,74 @@ function toggleEditorDetails(force) {
 function syncSidebarInputMode() {
   if (typeof window === 'undefined' || !window.matchMedia) return
   sidebarHoverCapable.value = window.matchMedia('(hover: hover) and (pointer: fine)').matches
+  topbarCompactEligible.value = window.matchMedia('(min-width: 1040px)').matches
   sidebarExpanded.value = !sidebarHoverCapable.value
+}
+
+function syncStickyChromeState() {
+  if (typeof window === 'undefined') return
+  const scrollTop = window.scrollY || document.documentElement.scrollTop || 0
+
+  currentScrollTop.value = scrollTop
+  hasScrolledPastTopbar.value = scrollTop > 120
+}
+
+function scrollEditorViewToTop() {
+  if (typeof window === 'undefined') return
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
+function syncTitleTextareaHeight() {
+  const element = titleTextarea.value
+  if (!element) return
+
+  element.style.height = '0px'
+  element.style.height = `${Math.max(element.scrollHeight, 54)}px`
+}
+
+function initTopbarObserver() {
+  destroyTopbarObserver()
+
+  if (typeof window === 'undefined' || !('IntersectionObserver' in window) || !topbarSentinel.value) return
+
+  topbarObserver = new window.IntersectionObserver(
+    ([entry]) => {
+      hasScrolledPastTopbar.value = !entry?.isIntersecting
+    },
+    {
+      threshold: 0,
+      rootMargin: '-120px 0px 0px 0px',
+    },
+  )
+
+  topbarObserver.observe(topbarSentinel.value)
+}
+
+function destroyTopbarObserver() {
+  topbarObserver?.disconnect()
+  topbarObserver = null
+}
+
+function initHeroAnimation() {
+  destroyHeroAnimation()
+
+  if (!heroAnimationHost.value || state.screen !== 'home') return
+
+  heroAnimationInstance = lottie.loadAnimation({
+    container: heroAnimationHost.value,
+    renderer: 'svg',
+    loop: true,
+    autoplay: true,
+    animationData: catFeelingAnimation,
+    rendererSettings: {
+      preserveAspectRatio: 'xMidYMid meet',
+    },
+  })
+}
+
+function destroyHeroAnimation() {
+  heroAnimationInstance?.destroy()
+  heroAnimationInstance = null
 }
 
 function onRailMouseEnter() {
@@ -1068,7 +1176,7 @@ function restoreDraftsIntoState() {
           <div class="brand-mark"></div>
           <div class="brand-text">
             <p class="eyebrow">Calm workspace</p>
-            <h1>Ledger</h1>
+            <h1>Stillnote</h1>
           </div>
         </div>
       </div>
@@ -1141,7 +1249,7 @@ function restoreDraftsIntoState() {
     </aside>
 
     <main :class="['main-shell', { 'editor-main-shell': isFocusedEditor }]">
-      <header v-if="!isFocusedEditor" class="topbar">
+      <header v-if="!isFocusedEditor" :class="['topbar', { 'is-condensed': isTopbarCondensed }]">
         <div class="topbar-copy">
           <p class="eyebrow">Notes that stay out of your way</p>
           <h2>{{ headerTitle }}</h2>
@@ -1192,6 +1300,7 @@ function restoreDraftsIntoState() {
           </div>
         </div>
       </header>
+      <div v-if="!isFocusedEditor" ref="topbarSentinel" class="topbar-sentinel" aria-hidden="true"></div>
 
       <section v-if="state.screen === 'home'" class="screen-grid">
         <article class="hero-panel">
@@ -1199,8 +1308,14 @@ function restoreDraftsIntoState() {
             <p class="eyebrow">Daily workflow</p>
             <h3>Capture faster, find anything, and write without clutter.</h3>
             <p>
-              Ledger now centers around a calmer reading surface, smart views, and search-first navigation so you can move from idea to note without losing momentum.
+              Stillnote centers around a calmer reading surface, smart views, and search-first navigation so you can move from idea to note without losing momentum.
             </p>
+          </div>
+
+          <div class="hero-animation-shell" aria-hidden="true">
+            <div class="hero-animation-frame">
+              <div ref="heroAnimationHost" class="hero-animation"></div>
+            </div>
           </div>
 
           <div class="hero-meta">
@@ -1437,44 +1552,52 @@ function restoreDraftsIntoState() {
 
       <section v-else :class="['screen-grid', 'editor-screen', { focused: isFocusedEditor }]">
         <article v-if="activeNote" :class="['editor-surface', { focused: isFocusedEditor }]">
-          <div class="editor-topbar">
-            <div class="editor-topbar-copy">
-              <button class="back-link" @click="openLibrary(state.smartView)">Back to library</button>
-              <div class="editor-status">
-                <span>{{ wordsInActiveNote }} words</span>
-                <span>{{ formatDate(activeNote.updatedAt) }}</span>
-                <span class="save-indicator" :data-state="state.saveStatus">
-                  {{ state.saveStatus === 'saving' ? 'Saving...' : state.saveStatus === 'typing' ? 'Editing...' : 'Saved' }}
-                </span>
+          <div class="editor-topbar-shell">
+            <div class="editor-topbar">
+              <div class="editor-topbar-copy">
+                <button class="back-link" @click="openLibrary(state.smartView)">Back to library</button>
+                <div class="editor-status">
+                  <span>{{ wordsInActiveNote }} words</span>
+                  <span>{{ formatDate(activeNote.updatedAt) }}</span>
+                  <span class="save-indicator" :data-state="state.saveStatus">
+                    {{ state.saveStatus === 'saving' ? 'Saving...' : state.saveStatus === 'typing' ? 'Editing...' : 'Saved' }}
+                  </span>
+                </div>
               </div>
-            </div>
 
-            <div class="editor-actions">
-              <button class="secondary-btn" @click="toggleEditorDetails()">
-                {{ state.editorDetailsOpen ? 'Close details' : 'Details' }}
-              </button>
-              <button class="ghost-btn danger" @click="removeCurrentNote">Delete</button>
+              <div class="editor-actions">
+                <button class="secondary-btn" @click="toggleEditorDetails()">
+                  {{ state.editorDetailsOpen ? 'Close details' : 'Details' }}
+                </button>
+                <button class="ghost-btn danger" @click="removeCurrentNote">Delete</button>
+              </div>
             </div>
           </div>
 
           <div class="editor-main">
-            <textarea
-              v-model="activeNote.title"
-              class="title-textarea"
-              rows="2"
-              placeholder="Untitled note"
-            ></textarea>
+            <div class="editor-title-card">
+              <textarea
+                ref="titleTextarea"
+                v-model="activeNote.title"
+                class="title-textarea"
+                rows="1"
+                placeholder="Untitled note"
+                @input="syncTitleTextareaHeight"
+              ></textarea>
+            </div>
 
-            <div class="editor-toolbar" aria-label="Text formatting toolbar">
-              <button class="toolbar-btn" type="button" @mousedown.prevent @click="applyEditorCommand('bold')"><strong>B</strong></button>
-              <button class="toolbar-btn" type="button" @mousedown.prevent @click="applyEditorCommand('italic')"><em>I</em></button>
-              <button class="toolbar-btn" type="button" @mousedown.prevent @click="applyEditorCommand('underline')"><u>U</u></button>
-              <button class="toolbar-btn" type="button" @mousedown.prevent @click="applyBlockFormat('h1')">H1</button>
-              <button class="toolbar-btn" type="button" @mousedown.prevent @click="applyBlockFormat('h2')">H2</button>
-              <button class="toolbar-btn" type="button" @mousedown.prevent @click="applyEditorCommand('insertUnorderedList')">- List</button>
-              <button class="toolbar-btn" type="button" @mousedown.prevent @click="applyEditorCommand('insertOrderedList')">1. List</button>
-              <button class="toolbar-btn" type="button" @mousedown.prevent @click="insertChecklist()">Checklist</button>
-              <button class="toolbar-btn" type="button" @mousedown.prevent @click="applyBlockFormat('blockquote')">Quote</button>
+            <div class="editor-toolbar-shell">
+              <div class="editor-toolbar" aria-label="Text formatting toolbar">
+                <button class="toolbar-btn" type="button" @mousedown.prevent @click="applyEditorCommand('bold')"><strong>B</strong></button>
+                <button class="toolbar-btn" type="button" @mousedown.prevent @click="applyEditorCommand('italic')"><em>I</em></button>
+                <button class="toolbar-btn" type="button" @mousedown.prevent @click="applyEditorCommand('underline')"><u>U</u></button>
+                <button class="toolbar-btn" type="button" @mousedown.prevent @click="applyBlockFormat('h1')">H1</button>
+                <button class="toolbar-btn" type="button" @mousedown.prevent @click="applyBlockFormat('h2')">H2</button>
+                <button class="toolbar-btn" type="button" @mousedown.prevent @click="applyEditorCommand('insertUnorderedList')">- List</button>
+                <button class="toolbar-btn" type="button" @mousedown.prevent @click="applyEditorCommand('insertOrderedList')">1. List</button>
+                <button class="toolbar-btn" type="button" @mousedown.prevent @click="insertChecklist()">Checklist</button>
+                <button class="toolbar-btn" type="button" @mousedown.prevent @click="applyBlockFormat('blockquote')">Quote</button>
+              </div>
             </div>
 
             <div class="body-editor-shell">
@@ -1569,6 +1692,17 @@ function restoreDraftsIntoState() {
           </transition>
         </article>
 
+        <button
+          v-if="showEditorScrollTopButton"
+          class="scroll-top-btn"
+          type="button"
+          aria-label="Scroll to top"
+          title="Scroll to top"
+          @click="scrollEditorViewToTop"
+        >
+          ↑
+        </button>
+
         <article v-else class="surface-card empty-editor">
           <p class="eyebrow">Nothing selected</p>
           <h3>Open a note or capture a new one.</h3>
@@ -1605,6 +1739,6 @@ function restoreDraftsIntoState() {
   </div>
 
   <div v-else class="loading-screen">
-    <p>Loading Ledger...</p>
+    <p>Loading Stillnote...</p>
   </div>
 </template>

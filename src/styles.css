@@ -138,12 +138,13 @@ select:focus {
   border-right: 1px solid var(--line);
   background: linear-gradient(180deg, rgba(255, 248, 240, 0.8), rgba(247, 239, 228, 0.72));
   backdrop-filter: blur(18px);
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   transition: padding 220ms ease;
   position: sticky;
-  top: 10px;
+  top: 0;
   align-self: start;
-  max-height: calc(100vh - 20px);
+  max-height: 100vh;
   scrollbar-width: thin;
   scrollbar-color: rgba(149, 82, 34, 0.42) rgba(255, 251, 245, 0.38);
 }
@@ -285,8 +286,11 @@ select:focus {
 }
 
 .rail-item.compact {
+  width: 100%;
+  max-width: 100%;
   justify-content: center;
   padding: 12px 10px;
+  overflow: hidden;
 }
 
 .rail-item-main {
@@ -294,6 +298,7 @@ select:focus {
   align-items: center;
   gap: 12px;
   min-width: 0;
+  max-width: 100%;
 }
 
 .rail-label {
@@ -453,25 +458,64 @@ select:focus {
 }
 
 .topbar {
+  --sticky-fill-offset: 26px;
   display: grid;
   gap: 18px;
+  width: 100%;
   margin-bottom: 22px;
   position: sticky;
   top: 10px;
   z-index: 35;
+  isolation: isolate;
   padding: 16px 18px;
   border: 1px solid rgba(62, 42, 18, 0.1);
   border-radius: 24px;
   background: rgba(250, 243, 234, 0.82);
   backdrop-filter: blur(18px);
   box-shadow: 0 18px 40px rgba(70, 48, 22, 0.08);
+  transform-origin: top right;
+  transition:
+    max-width 220ms ease,
+    gap 220ms ease,
+    padding 220ms ease,
+    background-color 220ms ease,
+    box-shadow 220ms ease,
+    border-color 220ms ease;
+}
+
+.topbar::before,
+.editor-topbar::before {
+  content: '';
+  position: absolute;
+  left: -1px;
+  right: -1px;
+  top: calc(-1 * var(--sticky-fill-offset));
+  height: calc(100% + var(--sticky-fill-offset));
+  border-radius: 30px;
+  background: linear-gradient(
+    180deg,
+    rgba(248, 241, 230, 0.98) 0%,
+    rgba(248, 241, 230, 0.98) 42%,
+    rgba(248, 241, 230, 0.9) 72%,
+    rgba(248, 241, 230, 0) 100%
+  );
+  pointer-events: none;
+  z-index: -1;
+}
+
+.topbar-copy {
+  min-width: 0;
+  max-height: 120px;
+  transition: opacity 200ms ease, max-height 200ms ease, transform 200ms ease;
 }
 
 .topbar-tools {
   display: grid;
-  grid-template-columns: minmax(280px, 1fr) minmax(380px, auto);
+  grid-template-columns: minmax(0, 1fr) minmax(430px, 520px);
   gap: 14px;
   align-items: center;
+  min-width: 0;
+  transition: gap 220ms ease;
 }
 
 .search-shell {
@@ -485,15 +529,25 @@ select:focus {
   background: rgba(255, 253, 249, 0.74);
   box-shadow: var(--shadow-sm);
   cursor: text;
+  overflow: hidden;
+  transition:
+    min-height 220ms ease,
+    padding 220ms ease,
+    border-radius 220ms ease,
+    background-color 220ms ease,
+    box-shadow 220ms ease;
 }
 
 .search-shell input {
+  flex: 1 1 auto;
   width: 100%;
+  max-width: 100%;
   min-width: 0;
   border: 0;
   background: transparent;
   padding: 6px 2px;
   box-shadow: none;
+  transition: max-width 200ms ease, opacity 180ms ease, padding 180ms ease;
 }
 
 .search-shell input:focus {
@@ -506,6 +560,7 @@ select:focus {
   position: relative;
   flex: 0 0 auto;
   pointer-events: none;
+  transition: transform 200ms ease;
 }
 
 .search-glyph::before,
@@ -534,9 +589,22 @@ select:focus {
 
 .capture-bar {
   display: grid;
-  grid-template-columns: 120px minmax(0, 1fr) auto;
+  grid-template-columns: minmax(112px, 132px) minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  transition: opacity 180ms ease, max-width 220ms ease, transform 220ms ease;
+}
+
+.capture-input {
+  width: 100%;
+  min-width: 0;
+}
+
+.capture-bar .primary-btn {
+  min-width: 104px;
+  white-space: nowrap;
 }
 
 .capture-bar select,
@@ -584,6 +652,84 @@ select:focus {
 .select-trigger-label {
   display: block;
   padding-right: 10px;
+}
+
+.topbar.is-condensed {
+  max-width: 100%;
+  margin-left: auto;
+}
+
+.topbar.is-condensed:not(:hover):not(:focus-within) {
+  --sticky-fill-offset: 18px;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  padding: 14px 18px;
+  background: rgba(246, 239, 229, 0.96);
+  box-shadow: 0 14px 30px rgba(70, 48, 22, 0.12);
+}
+
+.topbar.is-condensed:not(:hover):not(:focus-within) .topbar-copy {
+  display: grid;
+  place-items: center;
+  min-width: min(248px, 100%);
+  min-height: 72px;
+  padding: 10px 22px;
+  border: 1px solid rgba(62, 42, 18, 0.14);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.58), rgba(255, 248, 240, 0.2)),
+    linear-gradient(135deg, rgba(236, 211, 190, 0.86), rgba(247, 236, 222, 0.88));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55);
+  text-align: center;
+  transform: none;
+}
+
+.topbar.is-condensed:not(:hover):not(:focus-within) .topbar-tools {
+  grid-template-columns: auto;
+  gap: 0;
+  justify-content: end;
+}
+
+.topbar.is-condensed:not(:hover):not(:focus-within) .search-shell {
+  justify-content: center;
+  justify-self: end;
+  width: 86px;
+  min-width: 86px;
+  min-height: 56px;
+  padding: 0;
+  border-radius: 999px;
+  background: rgba(255, 253, 249, 0.88);
+  box-shadow: 0 10px 24px rgba(81, 57, 25, 0.1);
+}
+
+.topbar.is-condensed:not(:hover):not(:focus-within) .search-shell input {
+  max-width: 0;
+  opacity: 0;
+  padding: 0;
+}
+
+.topbar.is-condensed:not(:hover):not(:focus-within) .search-glyph {
+  transform: scale(1.08);
+}
+
+.topbar.is-condensed:not(:hover):not(:focus-within) .capture-bar {
+  max-width: 0;
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  transform: translateX(12px);
+  pointer-events: none;
+}
+
+.topbar.is-condensed:not(:hover):not(:focus-within) .topbar-copy .eyebrow {
+  margin-bottom: 4px;
+}
+
+.topbar-sentinel {
+  height: 1px;
+  margin-top: -1px;
+  pointer-events: none;
 }
 
 .select-menu {
@@ -644,8 +790,9 @@ select:focus {
 
 .hero-panel {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 320px) auto;
   gap: 24px;
+  align-items: center;
   padding: 26px;
 }
 
@@ -654,6 +801,38 @@ select:focus {
   color: var(--muted);
   line-height: 1.7;
   margin: 0;
+}
+
+.hero-copy {
+  min-width: 0;
+}
+
+.hero-animation-shell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+}
+
+.hero-animation-frame {
+  width: min(100%, 300px);
+  aspect-ratio: 1 / 1;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.hero-animation {
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.hero-animation svg {
+  width: 100% !important;
+  height: 100% !important;
 }
 
 .hero-meta {
@@ -736,6 +915,8 @@ select:focus {
 .app-shell.rail-collapsed .rail-nav,
 .app-shell.rail-collapsed .rail-section {
   justify-items: center;
+  width: 100%;
+  min-width: 0;
 }
 
 .smart-card {
@@ -933,19 +1114,24 @@ select:focus {
     radial-gradient(circle at top right, rgba(239, 209, 178, 0.28), transparent 24%),
     linear-gradient(180deg, rgba(255, 250, 244, 0.94) 0%, rgba(248, 240, 229, 0.9) 100%);
   position: relative;
-  overflow: hidden;
+  overflow: visible;
+}
+
+.editor-topbar-shell {
+  margin-bottom: 14px;
 }
 
 .editor-topbar {
+  --sticky-fill-offset: 24px;
   width: 100%;
-  margin: 0 auto 22px;
+  margin: 0 auto;
   display: flex;
   justify-content: space-between;
   gap: 18px;
-  align-items: start;
-  position: sticky;
-  top: 12px;
+  align-items: center;
+  position: relative;
   z-index: 20;
+  isolation: isolate;
   padding: 12px 14px;
   border: 1px solid rgba(62, 42, 18, 0.08);
   border-radius: 20px;
@@ -956,7 +1142,7 @@ select:focus {
 
 .editor-topbar-copy {
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 
 .back-link {
@@ -989,22 +1175,58 @@ select:focus {
   gap: 10px;
   flex-wrap: wrap;
   justify-content: flex-end;
+  align-items: center;
 }
 
 .editor-main {
   width: 100%;
-  min-height: calc(100dvh - 86px);
+  min-height: calc(100dvh - 84px);
   margin: 0 auto;
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
-  gap: 16px;
+  gap: 8px;
+}
+
+.editor-toolbar-shell {
+  position: sticky;
+  top: 0;
+  isolation: isolate;
+  overflow: visible;
+  z-index: 30;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  background: linear-gradient(180deg, rgba(248, 240, 229, 1) 0%, rgba(248, 240, 229, 1) 84%, rgba(248, 240, 229, 0) 100%);
+  backdrop-filter: blur(12px);
+}
+
+.editor-toolbar-shell::before {
+  content: '';
+  position: absolute;
+  left: -24px;
+  right: -24px;
+  top: -16px;
+  height: calc(100% + 16px);
+  background: linear-gradient(180deg, rgba(248, 240, 229, 1) 0%, rgba(248, 240, 229, 1) 76%, rgba(248, 240, 229, 0) 100%);
+  pointer-events: none;
+  z-index: -1;
+}
+
+.editor-title-card {
+  padding: 12px 18px 10px;
+  border: 1px solid rgba(62, 42, 18, 0.09);
+  border-radius: 22px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(255, 250, 244, 0.72)),
+    rgba(255, 250, 244, 0.88);
+  box-shadow: 0 12px 26px rgba(81, 57, 25, 0.08);
 }
 
 .title-textarea {
   width: 100%;
-  min-height: 84px;
+  min-height: 54px;
+  height: 54px;
   resize: none;
-  padding: 4px 2px 10px;
+  padding: 0;
   border: 0;
   background: transparent;
   box-shadow: none;
@@ -1012,6 +1234,7 @@ select:focus {
   font-size: clamp(34px, 4vw, 52px);
   line-height: 1.08;
   font-weight: 600;
+  overflow: hidden;
 }
 
 .title-textarea:focus {
@@ -1022,12 +1245,14 @@ select:focus {
 .editor-toolbar {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.56);
-  box-shadow: var(--shadow-sm);
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid rgba(62, 42, 18, 0.09);
+  border-radius: 20px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.8), rgba(255, 250, 244, 0.7)),
+    rgba(255, 255, 255, 0.74);
+  box-shadow: 0 10px 22px rgba(81, 57, 25, 0.07);
 }
 
 .toolbar-btn {
@@ -1053,6 +1278,33 @@ select:focus {
   background: rgba(255, 255, 255, 0.58);
   box-shadow: var(--shadow-lg);
   overflow: hidden;
+}
+
+.scroll-top-btn {
+  position: fixed;
+  right: clamp(18px, 3vw, 34px);
+  bottom: clamp(20px, 4vw, 36px);
+  z-index: 50;
+  width: 52px;
+  height: 52px;
+  border: 1px solid rgba(62, 42, 18, 0.12);
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(255, 250, 244, 0.78)),
+    rgba(255, 250, 244, 0.92);
+  box-shadow: 0 16px 30px rgba(81, 57, 25, 0.16);
+  color: var(--text);
+  font-size: 24px;
+  line-height: 1;
+  display: inline-grid;
+  place-items: center;
+  transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease, background-color 160ms ease;
+}
+
+.scroll-top-btn:hover {
+  transform: translateY(-2px);
+  border-color: rgba(188, 110, 55, 0.28);
+  box-shadow: 0 20px 34px rgba(81, 57, 25, 0.2);
 }
 
 .rich-editor {
@@ -1342,6 +1594,16 @@ select:focus {
   }
 }
 
+@media (max-width: 1380px) {
+  .topbar-tools {
+    grid-template-columns: 1fr;
+  }
+
+  .capture-bar {
+    grid-template-columns: minmax(132px, 168px) minmax(0, 1fr) auto;
+  }
+}
+
 @media (max-width: 860px) {
   .app-shell {
     grid-template-columns: 72px minmax(0, 1fr);
@@ -1356,8 +1618,8 @@ select:focus {
   }
 
   .rail {
-    top: 8px;
-    max-height: calc(100vh - 16px);
+    top: 0;
+    max-height: 100vh;
   }
 
   .main-shell.editor-main-shell {

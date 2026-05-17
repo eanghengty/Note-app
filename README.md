@@ -1,6 +1,6 @@
-# Ledger Notes
+# Stillnote
 
-Ledger is a local-first notes app built with Vue 3 and Vite for fast daily note-taking, search-first retrieval, and a calm writing experience.
+Stillnote is a local-first notes app built with Vue 3 and Vite for fast daily note-taking, search-first retrieval, and a calm writing experience.
 
 ## What It Does
 
